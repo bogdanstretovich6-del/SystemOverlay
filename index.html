@@ -1,0 +1,152 @@
+Chel:
+<script>
+let currentMode = 'test';
+let lastAnswer = '';
+let db;
+
+// ИНИЦИАЛИЗАЦИЯ INDEXEDDB
+function initDB() {
+const request = indexedDB.open("AiScannerDB", 1);
+request.onupgradeneeded = (e) => {
+db = e.target.result;
+if (!db.objectStoreNames.contains("scans")) {
+db.createObjectStore("scans", { keyPath: "id", autoIncrement: true });
+}
+};
+request.onsuccess = (e) => {
+db = e.target.result;
+loadHistoryFromDB();
+};
+}
+initDB();
+
+function saveToDB(imageData, mode, answer) {
+if (!db) return;
+const transaction = db.transaction(["scans"], "readwrite");
+const store = transaction.objectStore("scans");
+store.add({ image: imageData, mode: mode, answer: answer, timestamp: new Date().toLocaleString() });
+transaction.oncomplete = () => loadHistoryFromDB();
+}
+
+function loadHistoryFromDB(filterText = '') {
+if (!db) return;
+const dbList = document.getElementById('db-list');
+dbList.innerHTML = '';
+const transaction = db.transaction(["scans"], "readonly");
+const request = transaction.objectStore("scans").openCursor(null, 'prev');
+request.onsuccess = (e) => {
+const cursor = e.target.result;
+if (cursor) {
+const item = cursor.value;
+if (!filterText || item.answer.toLowerCase().includes(filterText.toLowerCase())) {
+const div = document.createElement('div');
+div.className = 'db-item';
+div.innerHTML = <img src="${item.image}"><div class="db-item-content"><div class="db-item-date">[${item.mode}] ${item.timestamp}</div><div class="db-item-text">${item.answer}</div></div><span class="db-item-del" onclick="deleteFromDB(${item.id})">✕</span>;
+dbList.appendChild(div);
+}
+cursor.continue();
+}
+};
+}
+
+function deleteFromDB(id) {
+db.transaction(["scans"], "readwrite").objectStore("scans").delete(id).oncomplete = () => loadHistoryFromDB();
+}
+
+function clearAllDB() {
+if (confirm("Удалить все сохраненные ответы?")) {
+db.transaction(["scans"], "readwrite").objectStore("scans").clear().oncomplete = () => loadHistoryFromDB();
+}
+}
+
+function filterDB() { loadHistoryFromDB(document.getElementById('db-search-input').value); }
+function toggleDBPanel() { document.getElementById('db-panel').classList.toggle('open'); }
+function setMode(el, mode) { document.querySelectorAll('.mode-chip').forEach(c => c.classList.remove('active')); el.classList.add('active'); currentMode = mode; }
+
+// ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ ДВИЖОК ПЕРЕТАСКИВАНИЯ (DRAG & DROP)
+const box = document.getElementById('scanner-box');
+let isDragging = false, startX, startY, initialLeft, initialTop;
+
+box.addEventListener('mousedown', startDrag);
+box.addEventListener('touchstart', startDrag, { passive: false });
+
+function startDrag(e) {
+if (e.target.closest('.top-bar, #answer-card, #action-btn')) return;
+isDragging = true;
+const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+startX = clientX; startY = clientY;
+const rect = box.getBoundingClientRect();
+box.style.transform = 'none';
+box.style.left = rect.left + 'px';
+box.style.top = rect.top + 'px';
+initialLeft = rect.left; initialTop = rect.top;
+document.addEventListener('mousemove', onDrag);
+document.addEventListener('touchmove', onDrag, { passive: false });
+document.addEventListener('mouseup', stopDrag);
+document.addEventListener('touchend', stopDrag);
+}
+
+Chel:
+function onDrag(e) {
+if (!isDragging) return;
+if (e.cancelable) e.preventDefault();
+const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+box.style.left = ${initialLeft + (clientX - startX)}px;
+box.style.top = ${initialTop + (clientY - startY)}px;
+}
+
+function stopDrag() {
+isDragging = false;
+document.removeEventListener('mousemove', onDrag);
+document.removeEventListener('touchmove', onDrag);
+}
+
+// ЛОГИКА СКАНИРОВАНИЯ И СНИМКА ЭКРАНА
+async function startScan(e) {
+if (e) e.stopPropagation();
+const answerCard = document.getElementById('answer-card');
+const answerText = document.getElementById('answer-text');
+const actions = document.getElementById('card-actions');
+answerCard.style.display = 'flex'; actions.style.display = 'none';
+answerText.style.color = '#ccc'; answerText.innerText = 'Запрашиваю доступ...';
+let stream;
+try {
+stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 15 } } });
+} catch (err) {
+answerText.style.color = '#ff453a'; answerText.innerText = 'Доступ отменен.'; return;
+}
+box.classList.add('scanning'); answerText.innerText = 'Анализирую кадр...';
+try {
+const video = document.createElement('video'); video.srcObject = stream;
+await video.play(); await new Promise(r => setTimeout(r, 200));
+const rect = box.getBoundingClientRect();
+const scaleX = video.videoWidth / window.innerWidth;
+const scaleY = video.videoHeight / window.innerHeight;
+const canvas = document.createElement('canvas');
+canvas.width = rect.width * scaleX; canvas.height = rect.height * scaleY;
+const ctx = canvas.getContext('2d');
+ctx.drawImage(video, rect.left * scaleX, rect.top * scaleY, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+const base64Image = canvas.toDataURL('image/jpeg', 0.8);
+stream.getTracks().forEach(t => t.stop());
+const result = await sendToAI(base64Image, currentMode);
+box.classList.remove('scanning');
+lastAnswer = result; answerText.style.color = '#34c759'; answerText.innerText = result; actions.style.display = 'flex';
+saveToDB(base64Image, currentMode, result);
+} catch (err) {
+box.classList.remove('scanning'); answerText.style.color = '#ff453a'; answerText.innerText = 'Ошибка считывания.';
+if (stream) stream.getTracks().forEach(t => t.stop());
+}
+}
+
+async function sendToAI(base64Data, mode) {
+await new Promise(r => setTimeout(r, 1200));
+return mode === 'test' ? '💡 Ответ: №2 (Сердце)' : '💡 Подробное решение задачи...';
+}
+
+function copyAnswer() { navigator.clipboard.writeText(lastAnswer); alert('Скопировано!'); }
+function speakAnswer() { window.speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(lastAnswer.replace('💡', '')); u.lang = 'ru-RU'; window.speechSynthesis.speak(u); }
+</script>
+</body>
+</html>
